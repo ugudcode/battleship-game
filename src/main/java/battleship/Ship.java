@@ -21,6 +21,7 @@ public abstract class Ship {
 
     public void place(int row, int col, boolean isHorizontal) {
         this.row = row;
+        
         this.col = col;
         this.isHorizontal = isHorizontal;
     }

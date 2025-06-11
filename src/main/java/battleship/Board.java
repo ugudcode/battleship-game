@@ -11,12 +11,14 @@ public class Board {
     private Set<Ship> ships;
     private Set<Ship> revealedShips;
     private static final int BOARD_SIZE = 10;
+    private int shotCount;
 
     public Board() {
         grid = new Ship[BOARD_SIZE][BOARD_SIZE];
         shots = new boolean[BOARD_SIZE][BOARD_SIZE];
         ships = new HashSet<>();
         revealedShips = new HashSet<>();
+        shotCount = 0;
     }
 
     public boolean placeShip(Ship ship, int row, int col, boolean horizontal) {
@@ -67,19 +69,20 @@ public class Board {
     }
 
     public boolean shoot(int row, int col) {
-        if (!isValidPosition(row, col)) {
+        if (row < 0 || row >= 10 || col < 0 || col >= 10) {
             return false;
         }
-
-        shots[row][col] = true;
-        Ship ship = grid[row][col];
-        if (ship != null) {
-            ship.isHit(row, col);
-            if (ship.isSunk()) {
-                ship.setSunk(true);
+        
+        if (!shots[row][col]) {
+            shots[row][col] = true;
+            shotCount++;
+            Ship ship = grid[row][col];
+            if (ship != null) {
+                ship.isHit(row, col);
             }
+            return true;
         }
-        return true;
+        return false;
     }
 
     public Ship getShipAt(int row, int col) {
@@ -122,5 +125,9 @@ public class Board {
 
     public boolean hasBeenShot(int row, int col) {
         return shots[row][col];
+    }
+
+    public int getShotCount() {
+        return shotCount;
     }
 }

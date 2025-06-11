@@ -53,7 +53,6 @@ public class BattleshipGUI extends JFrame {
     private JLabel hoverPositionLabel;
     private JComboBox<String> attackShipSelector;
     private JToggleButton carrierModeButton;
-    private JTextField debugTextField;
     private JButton[][] playerButtons;
     private JButton[][] computerButtons;
     private boolean gameStarted = false;
@@ -69,8 +68,13 @@ public class BattleshipGUI extends JFrame {
     private int gameTimeSeconds = 0;
     private Timer gameTimer;
     private Timer boardUpdateTimer;
+    private Timer abilityUpdateTimer;
     private Point currentOverlayPosition;
     private boolean isOverlayActive = false;
+    private AbilityManager abilityManager;
+    private JPanel abilityStatusPanel;
+    private Map<String, JLabel> abilityStatusLabels;
+    private Random random;
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
@@ -89,9 +93,13 @@ public class BattleshipGUI extends JFrame {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setResizable(false);
         
-        // Initialize boards
+        // Initialize boards and managers
         playerBoard = new Board();
         computerBoard = new Board();
+        cheats = new Konami();
+        abilityManager = new AbilityManager();
+        abilityStatusLabels = new HashMap<>();
+        random = new Random();
         
         // Initialize UI components with better spacing and layout
         mainPanel = new JPanel();
@@ -161,7 +169,8 @@ public class BattleshipGUI extends JFrame {
             shipButton.setBackground(BACKGROUND_COLOR);
             shipButton.setForeground(TEXT_COLOR);
             shipButton.setFocusPainted(false);
-            shipButton.addActionListener(e -> selectShip(shipType));
+            shipButton.setActionCommand(shipType);
+            shipButton.addActionListener(e -> selectShip(e.getActionCommand()));
             shipSelectionPanel.add(shipButton);
             shipSelectionPanel.add(Box.createVerticalStrut(5));
         }
@@ -206,20 +215,40 @@ public class BattleshipGUI extends JFrame {
         shipSelectionPanel.add(carrierModeButton);
         
         // Add attack ship selector
-        attackShipSelector = new JComboBox<>(SHIP_TYPES);
-        attackShipSelector.setFont(MAIN_FONT);
-        attackShipSelector.setMaximumSize(new Dimension(150, 35));
-        attackShipSelector.setAlignmentX(Component.CENTER_ALIGNMENT);
-        attackShipSelector.setEnabled(false);
-        attackShipSelector.addActionListener(e -> {
-            String selectedShip = (String) attackShipSelector.getSelectedItem();
-            carrierModeButton.setVisible(selectedShip != null && selectedShip.equals("Carrier"));
-            clearTargetingOverlay();
-        });
-        shipSelectionPanel.add(Box.createVerticalStrut(15));
-        shipSelectionPanel.add(attackShipSelector);
+        setupShipSelector();
         
-        mainPanel.add(shipSelectionPanel, BorderLayout.EAST);
+        // Create ability status panel
+        abilityStatusPanel = new JPanel();
+        abilityStatusPanel.setLayout(new BoxLayout(abilityStatusPanel, BoxLayout.Y_AXIS));
+        abilityStatusPanel.setBackground(BACKGROUND_COLOR);
+        abilityStatusPanel.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(BORDER_COLOR),
+            "Ability Status",
+            TitledBorder.CENTER,
+            TitledBorder.TOP,
+            MAIN_FONT,
+            TEXT_COLOR
+        ));
+
+        for (String shipType : SHIP_TYPES) {
+            JLabel statusLabel = new JLabel(shipType + ": " + abilityManager.getUnlockStatus(shipType));
+            statusLabel.setFont(MAIN_FONT);
+            statusLabel.setForeground(TEXT_COLOR);
+            statusLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+            abilityStatusLabels.put(shipType, statusLabel);
+            abilityStatusPanel.add(statusLabel);
+            abilityStatusPanel.add(Box.createVerticalStrut(5));
+        }
+
+        // Add ability status panel to the right side
+        JPanel rightPanel = new JPanel();
+        rightPanel.setLayout(new BoxLayout(rightPanel, BoxLayout.Y_AXIS));
+        rightPanel.setBackground(BACKGROUND_COLOR);
+        rightPanel.add(shipSelectionPanel);
+        rightPanel.add(Box.createVerticalStrut(BOARD_SPACING));
+        rightPanel.add(abilityStatusPanel);
+        
+        mainPanel.add(rightPanel, BorderLayout.EAST);
         
         // Set up the main window
         setContentPane(mainPanel);
@@ -239,7 +268,13 @@ public class BattleshipGUI extends JFrame {
             updateTimerLabel();
         });
 
-        boardUpdateTimer = new Timer(100, e -> {
+        // Update ability status 10 times per second (100ms)
+        abilityUpdateTimer = new Timer(100, e -> {
+            updateAbilityStatusLabels();
+        });
+
+        // Update board every 2 seconds
+        boardUpdateTimer = new Timer(2000, e -> {
             updatePlayerBoard();
             updateComputerBoard();
         });
@@ -252,14 +287,80 @@ public class BattleshipGUI extends JFrame {
     }
 
     private void setupKeyboardListener() {
+        List<Integer> debugCode = Arrays.asList(
+            KeyEvent.VK_UP,
+            KeyEvent.VK_RIGHT,
+            KeyEvent.VK_DOWN,
+            KeyEvent.VK_DOWN,
+            KeyEvent.VK_DOWN
+        );
+        List<Integer> nukeCode = Arrays.asList(
+            KeyEvent.VK_DOWN,
+            KeyEvent.VK_DOWN,
+            KeyEvent.VK_DOWN
+        );
+        List<Integer> currentSequence = new ArrayList<>();
+
         KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(e -> {
-            if (e.getID() == KeyEvent.KEY_PRESSED && e.getKeyCode() == KeyEvent.VK_R) {
-                if (selectedShip != null) {
-                    selectedShip.toggleOrientation();
-                    Point lastHovered = findLastHoveredPosition();
-                    if (lastHovered != null) {
-                        showShipPlacementPreview(lastHovered.x, lastHovered.y);
-                        updatePlacementLabel(lastHovered.x, lastHovered.y);
+            if (e.getID() == KeyEvent.KEY_PRESSED) {
+                if (e.getKeyCode() == KeyEvent.VK_R) {
+                    if (isPlacingShips && selectedShip != null) {
+                        selectedShip.toggleOrientation();
+                        Point lastHovered = findLastHoveredPosition();
+                        if (lastHovered != null) {
+                            showShipPlacementPreview(lastHovered.x, lastHovered.y);
+                            updatePlacementLabel(lastHovered.x, lastHovered.y);
+                        }
+                    } else if (gameStarted && !isPlacingShips) {
+                        // Toggle Carrier attack mode
+                        String selectedShipName = (String) attackShipSelector.getSelectedItem();
+                        if (selectedShipName != null && selectedShipName.equals("Carrier")) {
+                            carrierModeButton.setSelected(!carrierModeButton.isSelected());
+                            carrierModeButton.setText("Target Mode: " + (carrierModeButton.isSelected() ? "ROW" : "COLUMN"));
+                            Point lastHovered = findLastHoveredPosition();
+                            if (lastHovered != null) {
+                                updateTargetingOverlay(lastHovered.x, lastHovered.y);
+                            }
+                            statusLabel.setText("Carrier targeting mode changed to " + 
+                                (carrierModeButton.isSelected() ? "ROW" : "COLUMN"));
+                        }
+                    }
+                } else {
+                    // Handle sequences
+                    currentSequence.add(e.getKeyCode());
+                    
+                    // Check for debug code
+                    if (currentSequence.size() >= debugCode.size()) {
+                        List<Integer> lastDebugKeys = currentSequence.subList(
+                            currentSequence.size() - debugCode.size(), 
+                            currentSequence.size()
+                        );
+                        if (lastDebugKeys.equals(debugCode)) {
+                            debugMode = true;
+                            cheats = new Konami();
+                            cheats.processCheatCode("debug");
+                            statusLabel.setText("🎮 Debug mode activated! Enter ⬇⬇⬇ for nuclear strike! 🎮");
+                            currentSequence.clear();
+                        }
+                    }
+                    
+                    // Check for nuke code (only if debug mode is active)
+                    if (debugMode && currentSequence.size() >= nukeCode.size()) {
+                        List<Integer> lastNukeKeys = currentSequence.subList(
+                            currentSequence.size() - nukeCode.size(), 
+                            currentSequence.size()
+                        );
+                        if (lastNukeKeys.equals(nukeCode)) {
+                            if (gameStarted && !isPlacingShips) {
+                                handleNuclearStrike();
+                            }
+                            currentSequence.clear();
+                        }
+                    }
+                    
+                    // Keep sequence from growing too large
+                    if (currentSequence.size() > Math.max(debugCode.size(), nukeCode.size())) {
+                        currentSequence.remove(0);
                     }
                 }
             }
@@ -440,7 +541,12 @@ public class BattleshipGUI extends JFrame {
     private void updateHoverIndicator(int row, int col) {
         String position = String.format("%c%d", (char)('A' + col), row + 1);
         String selectedShipName = (String) attackShipSelector.getSelectedItem();
-        hoverPositionLabel.setText(String.format("Targeting position %s with %s", position, selectedShipName));
+        if (selectedShipName.equals("Carrier")) {
+            hoverPositionLabel.setText(String.format("Targeting position %s with %s (%s mode - Press R to rotate)", 
+                position, selectedShipName, carrierModeButton.isSelected() ? "ROW" : "COLUMN"));
+        } else {
+            hoverPositionLabel.setText(String.format("Targeting position %s with %s", position, selectedShipName));
+        }
     }
 
     private Ship createShip(String shipType) {
@@ -538,28 +644,51 @@ public class BattleshipGUI extends JFrame {
     }
 
     private void handlePlayerShot(int row, int col, JButton button) {
+        if (!gameStarted || computerBoard.hasBeenShot(row, col)) {
+            return;
+        }
+
         String selectedShipName = (String) attackShipSelector.getSelectedItem();
         Ship attackingShip = findPlayerShip(selectedShipName);
         
-        if (attackingShip == null || computerBoard.hasBeenShot(row, col)) {
+        // Basic validation
+        if (attackingShip == null) {
+            return;
+        }
+        
+        // Only allow Destroyer and Submarine at start, other ships need to be unlocked
+        if (!selectedShipName.equals("Destroyer") && !selectedShipName.equals("Submarine") && 
+            !abilityManager.isAbilityUnlocked(selectedShipName)) {
+            statusLabel.setText("This ship's ability is not yet unlocked!");
+            return;
+        }
+        
+        // Check ability availability for non-Destroyer ships
+        if (!selectedShipName.equals("Destroyer") && !abilityManager.isAbilityAvailable(selectedShipName)) {
+            if (selectedShipName.equals("Submarine")) {
+                statusLabel.setText("Submarine ability not available - Destroy an enemy ship to recharge!");
+            } else if (abilityManager.isAbilityUnlocked(selectedShipName)) {
+                statusLabel.setText("Ability on cooldown" + abilityManager.getRemainingCooldown(selectedShipName));
+            }
             return;
         }
 
         // Special case for Submarine - it reveals instead of attacking
         if (attackingShip instanceof Submarine) {
-            // Clear any previously revealed ships
+            // Use submarine ability
+            abilityManager.useSubmarine();
             computerBoard.clearRevealedShips();
-            
-            // Perform the reveal ability
             attackingShip.performAbility(computerBoard, row, col);
             updateComputerBoard();
+            updateAbilityStatusLabels();
             
-            // Start computer's turn after a delay to show the revealed ship
+            statusLabel.setText("🔍 Submarine reveals enemy ships! 🔍");
+            
             Timer revealTimer = new Timer(2000, e -> {
                 computerBoard.clearRevealedShips();
                 updateComputerBoard();
+                disableComputerBoard();
                 
-                // Check if game should continue
                 if (!computerBoard.allShipsSunk() && !playerBoard.allShipsSunk()) {
                     statusLabel.setText("Computer's turn - Preparing attack...");
                     updateBoardTitles(false);
@@ -572,53 +701,86 @@ public class BattleshipGUI extends JFrame {
             return;
         }
         
-        // Update carrier mode if using carrier
-        if (attackingShip instanceof Carrier) {
-            ((Carrier) attackingShip).setTargetRow(carrierModeButton.isSelected());
+        // Check for computer's Destroyer's defensive ability
+        Ship targetShip = computerBoard.getShipAt(row, col);
+        Ship computerDestroyer = computerBoard.getShips().stream()
+            .filter(ship -> ship instanceof Destroyer && !ship.isSunk())
+            .findFirst()
+            .orElse(null);
+            
+        if (computerDestroyer instanceof Destroyer && targetShip != null) {
+            if (((Destroyer)computerDestroyer).attemptCancelAttack(true)) {
+                statusLabel.setText("🛡️ Enemy Destroyer protected their " + targetShip.getName() + " from your attack! 🛡️");
+                Timer protectionTimer = new Timer(1500, e -> {
+                    statusLabel.setText("Computer's turn - Preparing attack...");
+                    updateBoardTitles(false);
+                    disableComputerBoard();
+                    startBoardSwitchTimer();
+                    ((Timer)e.getSource()).stop();
+                });
+                protectionTimer.setRepeats(false);
+                protectionTimer.start();
+                return;
+            }
         }
         
-        // Normal attack flow for other ships
+        // Record shot count before ability
+        int shotsBefore = computerBoard.getShotCount();
+        
+        // Record the shot for ability unlocking
+        abilityManager.recordHit(row, col, targetShip != null);
+        
+        // Normal attack flow
         computerBoard.shoot(row, col);
-        Ship hitShip = computerBoard.getShipAt(row, col);
+        button.setEnabled(false);
         
         // Update UI and perform ability
-        if (hitShip != null) {
+        StringBuilder statusMessage = new StringBuilder();
+        
+        if (targetShip != null) {
             button.setBackground(HIT_COLOR);
-            if (hitShip.isSunk()) {
-                statusLabel.setText(String.format("💥 %s SUNK by your %s! 💥", 
-                    hitShip.getName(), attackingShip.getName()));
+            if (targetShip.isSunk()) {
+                abilityManager.onShipDestroyed(targetShip.getName(), attackingShip.getName());
+                statusMessage.append(String.format("💥 %s SUNK by your %s! 💥", 
+                    targetShip.getName(), attackingShip.getName()));
             } else {
-                statusLabel.setText(String.format("🎯 Hit on enemy %s with your %s!", 
-                    hitShip.getName(), attackingShip.getName()));
+                statusMessage.append(String.format("🎯 Hit on enemy %s with your %s!", 
+                    targetShip.getName(), attackingShip.getName()));
             }
-            
-            // Perform ability
-            attackingShip.performAbility(computerBoard, row, col);
         } else {
             button.setBackground(MISS_COLOR);
-            statusLabel.setText("💨 Miss!");
+            statusMessage.append("💨 Miss!");
+        }
             
-            // For Carrier, perform ability even on miss
-            if (attackingShip instanceof Carrier) {
-                attackingShip.performAbility(computerBoard, row, col);
+        // Perform ship abilities if available
+        if (abilityManager.isAbilityAvailable(attackingShip.getName())) {
+            attackingShip.performAbility(computerBoard, row, col);
+            
+            // Start cooldown for ships with cooldowns
+            if (attackingShip instanceof Battleship || attackingShip instanceof Carrier) {
+                abilityManager.useAbility(attackingShip.getName());
             }
         }
         
-        // Update the board to reflect any changes from abilities
+        statusLabel.setText(statusMessage.toString());
+        updateAbilityStatusLabels();
         updateComputerBoard();
         
-        // Check for game over
         if (computerBoard.allShipsSunk()) {
             gameOver(true);
             return;
         }
         
-        // Check if game should continue
         if (!playerBoard.allShipsSunk()) {
-            // Start computer's turn
+            Timer turnTimer = new Timer(2000, e -> {
             statusLabel.setText("Computer's turn - Preparing attack...");
             updateBoardTitles(false);
+                disableComputerBoard();
             startBoardSwitchTimer();
+                ((Timer)e.getSource()).stop();
+            });
+            turnTimer.setRepeats(false);
+            turnTimer.start();
         } else {
             gameOver(false);
         }
@@ -769,8 +931,8 @@ public class BattleshipGUI extends JFrame {
                     } else {
                         button.setBackground(MISS_COLOR);
                     }
-                } else if (ship != null && computerBoard.isShipRevealed(ship)) {
-                    // Show revealed ships from submarine ability
+                } else if (ship != null && (computerBoard.isShipRevealed(ship) || (debugMode && cheats.shouldShowEnemyShips()))) {
+                    // Show revealed ships from submarine ability or debug mode
                     button.setBackground(REVEALED_SHIP_COLOR);
                 } else {
                     button.setBackground(WATER_COLOR);
@@ -947,7 +1109,7 @@ public class BattleshipGUI extends JFrame {
     }
 
     private void startBoardSwitchTimer() {
-        disableBoards();
+        disableComputerBoard();
         if (boardSwitchTimer != null) {
             boardSwitchTimer.stop();
         }
@@ -960,171 +1122,125 @@ public class BattleshipGUI extends JFrame {
     }
 
     private void computerTurn() {
-        boolean validShot = false;
-        final Ship attackingShip = selectRandomNonSunkShip(computerBoard);
-
-        if (attackingShip == null) {
-            enableBoards();  // Re-enable player's turn if no ships available
-            updateBoardTitles(true);
-            statusLabel.setText("Your turn - Select a target!");
+        if (playerBoard.allShipsSunk() || computerBoard.allShipsSunk()) {
             return;
         }
 
-        while (!validShot) {
-            int row = (int) (Math.random() * BOARD_SIZE);
-            int col = (int) (Math.random() * BOARD_SIZE);
+        Timer attackTimer = new Timer(1500, e -> {
+            // Computer's turn logic
+            int row, col;
+            do {
+                row = random.nextInt(BOARD_SIZE);
+                col = random.nextInt(BOARD_SIZE);
+            } while (playerBoard.hasBeenShot(row, col));
+
+            Ship targetShip = playerBoard.getShipAt(row, col);
             
-            if (!playerBoard.hasBeenShot(row, col)) {  // Only shoot at unshot locations
-                validShot = true;
-                playerBoard.shoot(row, col);
-                final Ship hitShip = playerBoard.getShipAt(row, col);
+            // Check for player's Destroyer's defensive ability
+            Ship playerDestroyer = playerBoard.getShips().stream()
+                .filter(ship -> ship instanceof Destroyer && !ship.isSunk())
+                .findFirst()
+                .orElse(null);
                 
-                // Update UI
-                SwingUtilities.invokeLater(() -> {
-                    statusLabel.setText(String.format("Computer attacks with %s", attackingShip.getName()));
-                    updatePlayerBoard();
-                    
-                    if (hitShip != null) {
-                        if (hitShip.isSunk()) {
-                            statusLabel.setText(String.format("💥 Your %s was SUNK by enemy %s! 💥", 
-                                hitShip.getName(), attackingShip.getName()));
+            if (playerDestroyer instanceof Destroyer && targetShip != null) {
+                if (((Destroyer)playerDestroyer).attemptCancelAttack(false)) {
+                    statusLabel.setText("🛡️ Your Destroyer protected your " + targetShip.getName() + " from enemy attack! 🛡️");
+                    Timer protectionTimer = new Timer(1500, evt -> {
+                        statusLabel.setText("Your turn!");
+            updateBoardTitles(true);
+                        enableComputerBoard();
+                        ((Timer)evt.getSource()).stop();
+                    });
+                    protectionTimer.setRepeats(false);
+                    protectionTimer.start();
+                    ((Timer)e.getSource()).stop();
+            return;
+                }
+            }
+
+                playerBoard.shoot(row, col);
+            
+            if (targetShip != null) {
+                playerButtons[row][col].setBackground(HIT_COLOR);
+                if (targetShip.isSunk()) {
+                    abilityManager.onPlayerShipSunk();
+                    statusLabel.setText(String.format("💥 Your %s was SUNK! 💥", targetShip.getName()));
                         } else {
-                            statusLabel.setText(String.format("🎯 Enemy %s hit your %s!", 
-                                attackingShip.getName(), hitShip.getName()));
-                        }
-                        
-                        // Perform ability
-                        attackingShip.performAbility(playerBoard, row, col);
+                    statusLabel.setText(String.format("🎯 Your %s was hit!", targetShip.getName()));
+                }
+            } else {
+                playerButtons[row][col].setBackground(MISS_COLOR);
+                statusLabel.setText("💨 Enemy missed!");
+            }
+
                         updatePlayerBoard();
+            updateAbilityStatusLabels();
                         
-                        // Check for game over
                         if (playerBoard.allShipsSunk()) {
                             gameOver(false);
-                            return;
-                        }
                     } else {
-                        statusLabel.setText(String.format("💨 Enemy %s missed!", attackingShip.getName()));
-                    }
-                    
-                    // Check if game should continue
-                    if (!computerBoard.allShipsSunk()) {
-                        // Start player's turn
-                        Timer turnTimer = new Timer(1500, e -> {
-                            statusLabel.setText("Your turn - Select a target!");
+                Timer turnTimer = new Timer(1500, evt -> {
+                    statusLabel.setText("Your turn!");
                             updateBoardTitles(true);
-                            enableBoards();
-                            ((Timer)e.getSource()).stop();
+                    enableComputerBoard();
+                    ((Timer)evt.getSource()).stop();
                         });
                         turnTimer.setRepeats(false);
                         turnTimer.start();
-                    } else {
-                        gameOver(true);
-                    }
-                });
             }
-        }
+
+            ((Timer)e.getSource()).stop();
+        });
+        attackTimer.setRepeats(false);
+        attackTimer.start();
     }
 
-    private Ship selectRandomNonSunkShip(Board board) {
-        List<Ship> ships = board.getShips();
-        List<Ship> availableShips = new ArrayList<>();
-        
-        // Get all non-sunk ships
-        for (Ship ship : ships) {
-            if (!ship.isSunk()) {
-                availableShips.add(ship);
-            }
-        }
-        
-        if (availableShips.isEmpty()) {
-            return null;
-        }
-        
-        // Select a random ship from available ships
-        int randomIndex = (int) (Math.random() * availableShips.size());
-        return availableShips.get(randomIndex);
-    }
-
-    private void disableBoards() {
-        setButtonsEnabled(computerBoardPanel, false);
-        setButtonsEnabled(playerBoardPanel, false);
-    }
-
-    private void enableBoards() {
-        if (!gameStarted) return;
-        setButtonsEnabled(computerBoardPanel, true);
-        setButtonsEnabled(playerBoardPanel, false);
-    }
-
-    private void setButtonsEnabled(JPanel panel, boolean enabled) {
-        for (Component comp : panel.getComponents()) {
-            if (comp instanceof JButton) {
-                JButton button = (JButton) comp;
-                if (enabled) {
-                    // Only enable buttons that haven't been shot at
-                    int row = -1, col = -1;
-                    for (int i = 0; i < BOARD_SIZE; i++) {
-                        for (int j = 0; j < BOARD_SIZE; j++) {
-                            if (panel == computerBoardPanel && button == computerButtons[i][j]) {
-                                row = i;
-                                col = j;
-                                break;
-                            }
-                        }
-                        if (row != -1) break;
-                    }
-                    if (row != -1 && !computerBoard.hasBeenShot(row, col)) {
-                        button.setEnabled(true);
-                    }
-                } else {
-                    button.setEnabled(false);
+    private void enableComputerBoard() {
+        for (int i = 0; i < BOARD_SIZE; i++) {
+            for (int j = 0; j < BOARD_SIZE; j++) {
+                if (!computerBoard.hasBeenShot(i, j)) {
+                    computerButtons[i][j].setEnabled(true);
                 }
             }
         }
     }
 
+    private void disableComputerBoard() {
+                    for (int i = 0; i < BOARD_SIZE; i++) {
+                        for (int j = 0; j < BOARD_SIZE; j++) {
+                computerButtons[i][j].setEnabled(false);
+            }
+        }
+    }
+
     private void startGame() {
-        SwingUtilities.invokeLater(() -> {
             gameStarted = true;
             isPlacingShips = false;
+        gameTimeSeconds = 0;
+        updateTimerLabel();
             
             // Place computer ships
             placeComputerShips();
             
-            statusLabel.setText("Game started! Take your shot!");
-            carrierModeButton.setVisible(true);
-            attackShipSelector.setEnabled(true);
-            
-            // Reset and start game timer
-            gameTimeSeconds = 0;
-            updateTimerLabel();
-            if (gameTimer != null) {
-                gameTimer.stop();
-            }
-            gameTimer = new Timer(1000, e -> {
-                gameTimeSeconds++;
-                updateTimerLabel();
-            });
+        // Start all timers
             gameTimer.start();
-            
-            // Start board update timer
-            if (boardUpdateTimer != null) {
-                boardUpdateTimer.stop();
-            }
-            boardUpdateTimer = new Timer(100, e -> {
-                updatePlayerBoard();
-                updateComputerBoard();
-            });
             boardUpdateTimer.start();
-            
-            enableBoards();
-        });
+        abilityUpdateTimer.start();
+        
+        // Enable UI for player's turn
+        attackShipSelector.setEnabled(true);
+        enableComputerBoard();
+        statusLabel.setText("Game started! Your turn first - Select a target!");
+        updateBoardTitles(true);
     }
 
     private void autoPlaceShips() {
         // Clear any existing ships
         playerBoard = new Board();
         
+        if (debugMode && cheats.shouldAutoPlaceShips()) {
+            cheats.autoPlaceShips(playerBoard);
+        } else {
         // Create and place ships in random positions
         Ship[] ships = {
             new Carrier(),
@@ -1144,6 +1260,7 @@ public class BattleshipGUI extends JFrame {
                 if (playerBoard.placeShip(ship, row, col, horizontal)) {
                     placed = true;
                     placedShipTypes.add(ship.getName());
+                    }
                 }
             }
         }
@@ -1168,49 +1285,122 @@ public class BattleshipGUI extends JFrame {
     }
 
     private void gameOver(boolean playerWon) {
-        // Stop all timers
+        gameStarted = false;
+            gameTimer.stop();
+            boardUpdateTimer.stop();
+        abilityUpdateTimer.stop();
+        disableComputerBoard();
+        
+        String message = playerWon ? "🎉 Congratulations! You won! 🎉" : "💀 Game Over - Computer wins! 💀";
+        statusLabel.setText(message);
+        
+        // Show game over dialog
+        int option = JOptionPane.showConfirmDialog(
+            this,
+            message + "\nWould you like to play again?",
+            "Game Over",
+            JOptionPane.YES_NO_OPTION
+        );
+        
+        if (option == JOptionPane.YES_OPTION) {
+            resetGame();
+        } else {
+            System.exit(0);
+        }
+    }
+
+    private void updateAbilityStatusLabels() {
+        for (String shipType : SHIP_TYPES) {
+            JLabel label = abilityStatusLabels.get(shipType);
+            if (label != null) {
+                label.setText(shipType + ": " + abilityManager.getUnlockStatus(shipType));
+            }
+        }
+    }
+
+    private void setupShipSelector() {
+        attackShipSelector = new JComboBox<>(SHIP_TYPES);
+        attackShipSelector.setFont(MAIN_FONT);
+        attackShipSelector.setMaximumSize(new Dimension(150, 35));
+        attackShipSelector.setAlignmentX(Component.CENTER_ALIGNMENT);
+        attackShipSelector.setEnabled(true);
+        
+        // Set initial selection to Destroyer
+        attackShipSelector.setSelectedItem("Destroyer");
+        
+        // Add to ship selection panel
+        shipSelectionPanel.add(Box.createVerticalStrut(15));
+        shipSelectionPanel.add(attackShipSelector);
+    }
+
+    private void updateAttackShipSelector() {
+        String currentSelection = (String) attackShipSelector.getSelectedItem();
+        attackShipSelector.removeAllItems();
+        
+        // Always add Destroyer first as it's always available
+        attackShipSelector.addItem("Destroyer");
+        
+        // Add other ships only if their abilities are unlocked
+        if (abilityManager.isAbilityUnlocked("Carrier")) {
+            attackShipSelector.addItem("Carrier");
+        }
+        if (abilityManager.isAbilityUnlocked("Battleship")) {
+            attackShipSelector.addItem("Battleship");
+        }
+        if (abilityManager.isAbilityUnlocked("Cruiser")) {
+            attackShipSelector.addItem("Cruiser");
+        }
+        if (abilityManager.isAbilityUnlocked("Submarine")) {
+            attackShipSelector.addItem("Submarine");
+        }
+        
+        // Try to restore the previous selection if it's still available
+        ComboBoxModel<String> model = attackShipSelector.getModel();
+        boolean selectionExists = false;
+        for (int i = 0; i < model.getSize(); i++) {
+            if (model.getElementAt(i).equals(currentSelection)) {
+                selectionExists = true;
+                break;
+            }
+        }
+        if (currentSelection != null && selectionExists) {
+            attackShipSelector.setSelectedItem(currentSelection);
+        }
+    }
+
+    private void resetGame() {
+        // Reset game state
+        gameStarted = false;
+        isPlacingShips = true;
+        placedShipTypes.clear();
+        playerBoard = new Board();
+        computerBoard = new Board();
+        cheats = new Konami();
+        abilityManager = new AbilityManager();
+        abilityStatusLabels.clear();
+        
+        // Reset UI
+        updatePlayerBoard();
+        updateComputerBoard();
+        updateInstructionLabel();
+        updateBoardTitles(true);
+        enableComputerBoard();
+        
+        // Reset timers
         if (gameTimer != null) {
             gameTimer.stop();
         }
         if (boardUpdateTimer != null) {
             boardUpdateTimer.stop();
         }
+        if (abilityUpdateTimer != null) {
+            abilityUpdateTimer.stop();
+        }
         if (boardSwitchTimer != null) {
             boardSwitchTimer.stop();
         }
         
-        // Disable all boards
-        disableBoards();
-        
-        // Update UI
-        String message = playerWon ? 
-            "🎉 Congratulations! You've won! 🎉" : 
-            "💀 Game Over - The enemy has destroyed your fleet! 💀";
-        statusLabel.setText(message);
-        
-        // Show final game state
-        updatePlayerBoard();
-        updateComputerBoard();
-        
-        // Show game over dialog
-        String timeStr = String.format("%d:%02d", gameTimeSeconds / 60, gameTimeSeconds % 60);
-        String title = playerWon ? "Victory!" : "Defeat!";
-        String fullMessage = String.format("%s\nGame Time: %s", message, timeStr);
-        
-        int choice = JOptionPane.showConfirmDialog(
-            this,
-            fullMessage + "\nWould you like to play again?",
-            title,
-            JOptionPane.YES_NO_OPTION,
-            JOptionPane.INFORMATION_MESSAGE
-        );
-        
-        if (choice == JOptionPane.YES_OPTION) {
-            // Reset and start new game
-            dispose();
-            new BattleshipGUI().setVisible(true);
-        } else {
-            dispose();
-        }
+        // Start new game
+        startGame();
     }
 } 
